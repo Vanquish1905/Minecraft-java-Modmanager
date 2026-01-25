@@ -1,26 +1,10 @@
 import sys
-import subprocess
-import importlib.util
 import os
+import multiprocessing
 
-# --- Dependency Auto-Installation ---
-REQUIRED_PACKAGES = ["customtkinter", "requests", "pillow", "packaging"]
+def main():
 
-def check_and_install_packages():
-    print("Checking dependencies...")
-    for package in REQUIRED_PACKAGES:
-        spec = importlib.util.find_spec(package)
-        if spec is None:
-            print(f"Installing missing package: {package}")
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to install {package}: {e}")
-                sys.exit(1)
-    print("All dependencies installed.")
-
-if __name__ == "__main__":
-    check_and_install_packages()
+    multiprocessing.freeze_support()
 
     try:
         from config import Config
@@ -30,6 +14,19 @@ if __name__ == "__main__":
         mgr = ModManager(conf)
         app = App(conf, mgr)
         app.mainloop()
+
+    except ImportError as e:
+        print(f"Kritischer Fehler: Eine Bibliothek wurde nicht gefunden: {e}")
+        if not getattr(sys, 'frozen', False):
+            print("\nInstallation mit: pip install customtkinter requests pillow packaging")
+      
+        input("\nDrücke Enter zum Beenden...")
+        sys.exit(1)
+
     except Exception as e:
-        print(f"Critical Error: {e}")
-        input("Press Enter to exit...")
+        print(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
+        input("\nDrücke Enter zum Beenden...")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
