@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -88,7 +89,11 @@ def open_path(path: os.PathLike | str) -> None:
     elif IS_MAC:
         subprocess.Popen(["open", path])
     else:
-        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for cmd in (["xdg-open", path], ["gio", "open", path], ["kde-open", path], ["exo-open", path]):
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+        raise OSError(f"No program found to open files (install xdg-utils).\n\nPath: {path}")
 
 
 _INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')

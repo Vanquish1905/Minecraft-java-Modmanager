@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from ..instances import Instance, InstanceManager
 from ..net import Cancelled
 from ..platform_utils import IS_MAC, IS_WINDOWS, human_duration, open_path
 from .theme import Theme
-from .widgets import TaskRunner, bind_right_click, bind_wheel
+from .widgets import TaskRunner, app_icon, bind_right_click, bind_wheel
 
 TILE_W, TILE_H = 132, 128
 ICON = 64
@@ -33,16 +34,28 @@ class RunningGame:
 
 @dataclass
 class InstanceLog:
+    """Game output. `add` is thread-safe; lines reach the UI in batches via `flush`,
+    so a chatty game can't flood the window with one redraw per line."""
     lines: list = field(default_factory=list)
     listeners: list = field(default_factory=list)
+    pending: list = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add(self, line: str) -> None:
-        self.lines.append(line)
+        with self.lock:
+            self.pending.append(line)
+
+    def flush(self) -> None:
+        with self.lock:
+            if not self.pending:
+                return
+            batch, self.pending = self.pending, []
+        self.lines.extend(batch)
         if len(self.lines) > MAX_LOG_LINES:
             del self.lines[:len(self.lines) - MAX_LOG_LINES]
         for fn in list(self.listeners):
             try:
-                fn(line)
+                fn(batch)
             except tk.TclError:
                 self.listeners.remove(fn)
 
@@ -63,8 +76,11 @@ class App:
         self.root = tk.Tk(className="VanquishModManager")
         self.root.title(APP_NAME)
         self.root.minsize(820, 520)
-        self.root.geometry(self.settings.window_geometry or "1100x680")
+        geo = self.settings.window_geometry.split("+")[0]
+        self.root.geometry(geo if geo and "x" in geo else "1100x680")
         self.theme = Theme(self.root, self.settings.theme)
+        self._icon = app_icon(self.root)
+        self.root.iconphoto(True, self._icon)
 
         self.running: dict[str, RunningGame] = {}
         self.logs: dict[str, InstanceLog] = {}
@@ -72,12 +88,19 @@ class App:
         self.selected: Optional[Instance] = None
         self._all: list[Instance] = []
         self._tiles: list[tuple[tuple[int, int, int, int], Instance]] = []
+        self._tile_items: dict[str, tuple[int, int]] = {}
+        self._cache: dict[str, Instance] = {}
         self._hover: Optional[str] = None
 
         self.tasks = TaskRunner(self.root, self._set_status)
         self._build()
+        self._bind_shortcuts()
         self.refresh_instances()
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.after(100, self._flush_logs)
+        # Warm the version list cache in the background so "Add Instance" opens instantly.
+        from .. import versions
+        self.tasks.run(lambda p, c: versions.get_manifest(self.paths), quiet=True, on_error=lambda e: None)
         if IS_MAC:
             self.root.createcommand("::tk::mac::ShowPreferences", self.open_settings)
             self.root.createcommand("::tk::mac::Quit", self.quit)
@@ -112,8 +135,8 @@ class App:
         self.account_btn.pack(side="right")
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._redraw())
-        search = ttk.Entry(bar, textvariable=self.search_var, width=22)
-        search.pack(side="right", padx=8)
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=22)
+        self.search_entry.pack(side="right", padx=8)
         ttk.Label(bar, text="Filter:", style="SurfaceMuted.TLabel").pack(side="right")
 
         # Status bar
@@ -148,8 +171,38 @@ class App:
         self._build_sidebar()
         self._update_account_label()
 
+    def _bind_shortcuts(self):
+        mod = "Command" if IS_MAC else "Control"
+        r = self.root
+        r.bind_all(f"<{mod}-n>", lambda e: self.new_instance())
+        r.bind_all(f"<{mod}-comma>", lambda e: self.open_settings())
+        r.bind_all(f"<{mod}-q>", lambda e: self.quit())
+        r.bind(f"<{mod}-f>", lambda e: self.search_entry.focus_set())
+        r.bind("<F5>", lambda e: self.refresh_instances())
+        for key, dx in (("Left", -1), ("Right", 1), ("Up", "up"), ("Down", "down")):
+            self.canvas.bind(f"<{key}>", lambda e, d=dx: self._move_selection(d))
+
+    def _move_selection(self, d):
+        visible = [inst for _, inst in self._tiles]
+        if not visible:
+            return
+        if self.selected is None or self.selected not in visible:
+            self.select(visible[0])
+            return
+        idx = visible.index(self.selected)
+        cols = max(1, (max(self.canvas.winfo_width(), TILE_W + 20) - 20) // TILE_W)
+        step = {"up": -cols, "down": cols}.get(d, d)
+        self.select(visible[max(0, min(len(visible) - 1, idx + step))])
+
+    def _flush_logs(self):
+        for log in list(self.logs.values()):
+            log.flush()
+        self.root.after(100, self._flush_logs)
+
     def _build_sidebar(self):
         sb = self.sidebar
+        self.side_icon = tk.Canvas(sb, width=72, height=72, bg=self.theme.c["surface"], highlightthickness=0)
+        self.side_icon.pack(anchor="w", pady=(0, 8))
         self.side_name = ttk.Label(sb, text="", style="Surface.TLabel", font=self.theme.fonts["heading"],
                                    wraplength=210, justify="left")
         self.side_name.pack(anchor="w")
@@ -197,7 +250,20 @@ class App:
     # ------------------------------------------------------------------ instances grid
 
     def refresh_instances(self, select_id: str | None = None):
-        self._all = self.instances.list()
+        # Keep one Instance object per instance so open windows always see current data.
+        merged = []
+        for fresh in self.instances.list():
+            old = self._cache.get(fresh.id)
+            if old is not None:
+                old.__dict__.update(fresh.__dict__)
+                merged.append(old)
+            else:
+                self._cache[fresh.id] = fresh
+                merged.append(fresh)
+        ids = {i.id for i in merged}
+        for k in [k for k in self._cache if k not in ids]:
+            del self._cache[k]
+        self._all = merged
         sel = select_id or (self.selected.id if self.selected else None)
         self.selected = next((i for i in self._all if i.id == sel), None)
         self._redraw()
@@ -219,6 +285,7 @@ class App:
         f = self.theme.fonts
         cv.delete("all")
         self._tiles = []
+        self._tile_items = {}
         width = max(cv.winfo_width(), TILE_W + 20)
         items = self._visible()
         if not items:
@@ -254,7 +321,7 @@ class App:
         hover = self._hover == inst.id
         x1, y1 = x0 + TILE_W - 8, y0 + TILE_H - 8
         bg = c["select"] if sel else c["tile_hover"] if hover else c["bg"]
-        cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline=c["accent"] if sel else bg, width=1)
+        rect = cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline=c["accent"] if sel else bg, width=1)
         ix = x0 + (TILE_W - 8 - ICON) // 2
         iy = y0 + 8
         cv.create_rectangle(ix, iy, ix + ICON, iy + ICON, fill=tile_color(inst.name), outline="")
@@ -266,9 +333,21 @@ class App:
             cv.create_rectangle(ix, iy + ICON - 14, ix + ICON, iy + ICON, fill="#000000", outline="", stipple="gray50")
             cv.create_text(ix + ICON // 2, iy + ICON - 7, text=inst.loader.capitalize(), fill="#ffffff", font=f["small"])
         name = inst.name if len(inst.name) <= 34 else inst.name[:32] + "..."
-        cv.create_text(x0 + (TILE_W - 8) // 2, iy + ICON + 6, text=name, anchor="n", width=TILE_W - 16,
-                       fill=c["select_fg"] if sel else c["fg"], font=f["normal"], justify="center")
+        label = cv.create_text(x0 + (TILE_W - 8) // 2, iy + ICON + 6, text=name, anchor="n", width=TILE_W - 16,
+                               fill=c["select_fg"] if sel else c["fg"], font=f["normal"], justify="center")
         self._tiles.append(((x0, y0, x1, y1), inst))
+        self._tile_items[inst.id] = (rect, label)
+
+    def _paint_tile(self, inst_id: Optional[str]):
+        """Recolour one tile in place (much cheaper than redrawing the whole grid)."""
+        items = self._tile_items.get(inst_id or "")
+        if not items:
+            return
+        c = self.theme.c
+        sel = self.selected is not None and self.selected.id == inst_id
+        bg = c["select"] if sel else c["tile_hover"] if self._hover == inst_id else c["bg"]
+        self.canvas.itemconfigure(items[0], fill=bg, outline=c["accent"] if sel else bg)
+        self.canvas.itemconfigure(items[1], fill=c["select_fg"] if sel else c["fg"])
 
     def _hit(self, event) -> Optional[Instance]:
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
@@ -291,8 +370,9 @@ class App:
         inst = self._hit(event)
         hid = inst.id if inst else None
         if hid != self._hover:
-            self._hover = hid
-            self._redraw()
+            old, self._hover = self._hover, hid
+            self._paint_tile(old)
+            self._paint_tile(hid)
 
     def _on_context(self, event):
         inst = self._hit(event)
@@ -322,8 +402,20 @@ class App:
             menu.grab_release()
 
     def select(self, inst: Optional[Instance]):
+        old = self.selected.id if self.selected else None
         self.selected = inst
-        self._redraw()
+        self._paint_tile(old)
+        self._paint_tile(inst.id if inst else None)
+        if inst is not None:
+            for (x0, y0, x1, y1), i in self._tiles:  # keep the selection on screen
+                if i is inst:
+                    top, bottom = self.canvas.canvasy(0), self.canvas.canvasy(self.canvas.winfo_height())
+                    region = float(self.canvas.cget("scrollregion").split()[-1] or 1)
+                    if y0 < top:
+                        self.canvas.yview_moveto(max(0.0, (y0 - 10) / region))
+                    elif y1 > bottom:
+                        self.canvas.yview_moveto(max(0.0, (y1 + 10 - self.canvas.winfo_height()) / region))
+                    break
         self._update_sidebar()
 
     def _update_sidebar(self):
@@ -331,13 +423,22 @@ class App:
         state = "normal" if inst else "disabled"
         for b in self.side_buttons:
             b.configure(state=state)
+        self.side_icon.delete("all")
         if not inst:
+            self.side_icon.pack_forget()
             self.side_name.configure(text="")
             self.side_info.configure(text="Select an instance")
             self.btn_launch.configure(state="disabled")
             self.btn_kill.configure(state="disabled")
             return
         running = inst.id in self.running
+        if not self.side_icon.winfo_ismapped():
+            self.side_icon.pack(anchor="w", pady=(0, 8), before=self.side_name)
+        self.side_icon.create_rectangle(0, 0, 72, 72, fill=tile_color(inst.name), outline="")
+        self.side_icon.create_text(36, 36, text=(inst.name[:1] or "?").upper(), fill="#ffffff",
+                                   font=self.theme.fonts["tile"])
+        if running:
+            self.side_icon.create_oval(56, 4, 68, 16, fill="#5cff6a", outline="")
         self.side_name.configure(text=inst.name)
         played = (time.strftime("%Y-%m-%d %H:%M", time.localtime(inst.last_played))
                   if inst.last_played else "never")
@@ -348,7 +449,8 @@ class App:
         if running:
             lines.append("Running")
         self.side_info.configure(text="\n".join(lines))
-        self.btn_launch.configure(state="disabled" if running else "normal")
+        self.btn_launch.configure(state="disabled" if running else "normal",
+                                  text="Running..." if running else "Launch")
         self.btn_kill.configure(state="normal" if running else "disabled")
         self.btn_delete.configure(state="disabled" if running else "normal")
 
@@ -493,7 +595,7 @@ class App:
         def work(progress, cancel):
             def prog(text, frac=None):
                 progress(text, frac)
-                self.tasks.post(log.add, f"[launcher] {text}")
+                log.add(f"[launcher] {text}")
             account = acc
             if account.kind == "msa":
                 prog("Refreshing Microsoft login...")
@@ -507,8 +609,7 @@ class App:
             cmd, account = res
             log.add("[launcher] Java command: " + launch.censor(cmd, account))
             try:
-                proc = launch.start(cmd, inst.game_dir,
-                                    lambda line: self.tasks.post(log.add, line),
+                proc = launch.start(cmd, inst.game_dir, log.add,
                                     lambda code: self.tasks.post(self._game_exited, inst, code))
             except OSError as e:
                 messagebox.showerror("Launch failed", str(e), parent=self.root)
@@ -539,12 +640,14 @@ class App:
         rg = self.running.pop(inst.id, None)
         log = self.log_for(inst)
         log.add(f"[launcher] Game exited with code {code}")
-        # Reload from disk so edits made while running are kept.
-        fresh = Instance.load(inst.root) or inst
-        if rg:
-            fresh.total_play_seconds += time.time() - rg.started
-            fresh.last_played = time.time()
-            fresh.save()
+        # Reload from disk so edits made while running are kept, then add the play time.
+        fresh = Instance.load(inst.root)
+        if fresh is not None:
+            inst.__dict__.update(fresh.__dict__)
+        if rg and inst.root.exists():
+            inst.total_play_seconds += time.time() - rg.started
+            inst.last_played = time.time()
+            inst.save()
         if self.settings.close_on_launch and not self.running:
             self.root.deiconify()
         self.refresh_instances()
@@ -578,7 +681,7 @@ class App:
                 parent=self.root):
             return
         try:
-            self.settings.window_geometry = self.root.geometry()
+            self.settings.window_geometry = self.root.geometry().split("+")[0]
             self.config.save()
         except Exception:
             pass

@@ -75,8 +75,12 @@ class AccountStore:
         self.save()
 
     def add(self, acc: Account) -> None:
-        self.accounts = [a for a in self.accounts if a.uuid != acc.uuid]
-        self.accounts.append(acc)
+        for i, a in enumerate(self.accounts):
+            if a.uuid == acc.uuid:  # refreshed login: keep its position
+                self.accounts[i] = acc
+                break
+        else:
+            self.accounts.append(acc)
         if not self.default_uuid or len(self.accounts) == 1:
             self.default_uuid = acc.uuid
         self.save()

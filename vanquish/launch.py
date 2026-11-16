@@ -21,7 +21,7 @@ class LaunchError(Exception):
 
 
 def ensure_installed(paths: Paths, inst: Instance, progress=None,
-                     cancel: threading.Event | None = None, workers: int = 8) -> dict:
+                     cancel: threading.Event | None = None, workers: int = 8, verify: bool = False) -> dict:
     """Download the loader profile and all game files the instance needs."""
     vid = inst.version_id
     if inst.loader != "vanilla":
@@ -30,7 +30,9 @@ def ensure_installed(paths: Paths, inst: Instance, progress=None,
                 progress(f"Finding {inst.loader} version...", None)
             inst.loader_version = loaders.recommended_loader_version(inst.loader, inst.mc_version)
         expected = versions.version_json_path(paths, vid) if vid else None
-        if not vid or not expected.exists() or inst.loader_version not in vid or inst.mc_version not in vid:
+        stale = not vid or not vid.startswith(f"{inst.loader}-") or \
+            f"-{inst.loader_version}-" not in vid or not vid.endswith(f"-{inst.mc_version}")
+        if stale or not expected.exists():
             if progress:
                 progress(f"Installing {loaders.LOADER_LABELS[inst.loader]} {inst.loader_version}...", None)
             vid = loaders.install_loader_profile(paths, inst.loader, inst.mc_version, inst.loader_version)
@@ -39,7 +41,7 @@ def ensure_installed(paths: Paths, inst: Instance, progress=None,
     if vid != inst.version_id:
         inst.version_id = vid
         inst.save()
-    return versions.install_version(paths, vid, progress, cancel, workers=workers)
+    return versions.install_version(paths, vid, progress, cancel, workers=workers, verify=verify)
 
 
 def _substitute(arg: str, values: dict) -> str:

@@ -50,6 +50,20 @@ On Windows, use `py main.py` or double-click `main.py`. You can also start it wi
 3. Select the instance and click **Mods**, then **Download mods** to install mods from Modrinth.
 4. Click **Launch**.
 
+### Keyboard shortcuts
+
+| Action | Windows / Linux | macOS |
+|--------|-----------------|-------|
+| New instance | Ctrl+N | Cmd+N |
+| Settings | Ctrl+, | Cmd+, |
+| Filter instances | Ctrl+F | Cmd+F |
+| Refresh | F5 | F5 |
+| Select instance | Arrow keys | Arrow keys |
+| Launch / delete selected | Enter / Delete | Enter / Delete |
+| Quit | Ctrl+Q | Cmd+Q |
+
+In lists, click a column heading to sort it. In the Mods tab, click the "On" column to turn a mod on or off.
+
 ## Where data is stored
 
 | OS      | Folder |

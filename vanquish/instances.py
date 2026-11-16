@@ -1,7 +1,10 @@
 """Instances: self-contained game folders, each with its own version, loader and mods."""
 from __future__ import annotations
 
+import os
 import shutil
+import stat
+import sys
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -133,7 +136,13 @@ class InstanceManager:
         root = inst.root.resolve()
         if root.parent != self.paths.instances.resolve():
             raise ValueError("Refusing to delete a folder outside the instances directory")
-        shutil.rmtree(root)
+        def make_writable(func, path, _exc):  # Windows refuses to delete read-only files
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(root, onexc=make_writable)
+        else:
+            shutil.rmtree(root, onerror=make_writable)
 
     def copy(self, inst: Instance, new_name: str, include_saves: bool = True) -> Instance:
         folder = self._unique_folder(new_name)

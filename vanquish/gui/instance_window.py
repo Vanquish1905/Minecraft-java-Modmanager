@@ -68,8 +68,11 @@ class InstanceWindow(tk.Toplevel):
             tab.refresh()
 
     def _open(self, path: Path):
-        path.mkdir(parents=True, exist_ok=True)
-        open_path(path)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            open_path(path)
+        except OSError as e:
+            messagebox.showerror("Could not open folder", str(e), parent=self)
 
     def _kill(self):
         self.app.select(self.inst)
@@ -120,9 +123,7 @@ class LogTab(ttk.Frame):
         frame.columnconfigure(0, weight=1)
         self.text.bind("<Key>", self._readonly)
         self.log = win.app.log_for(win.inst)
-        for line in self.log.lines:
-            self._append(line, scroll=False)
-        self.text.see("end")
+        self._append(self.log.lines)
         self.log.listeners.append(self._append)
 
     @staticmethod
@@ -131,19 +132,36 @@ class LogTab(ttk.Frame):
             return None
         return "break"
 
-    def _append(self, line: str, scroll: bool = True):
-        tag = ()
+    @staticmethod
+    def _tag(line: str) -> str:
         if line.startswith("[launcher]") or line.startswith("---"):
-            tag = ("launcher",)
-        elif "/ERROR]" in line or "ERROR" in line[:40] or "Exception" in line:
-            tag = ("error",)
-        elif "/WARN]" in line or "WARN" in line[:40]:
-            tag = ("warn",)
-        self.text.insert("end", line + "\n", tag)
+            return "launcher"
+        if "/ERROR]" in line or "ERROR" in line[:40] or "Exception" in line or line.startswith("\tat "):
+            return "error"
+        if "/WARN]" in line or "WARN" in line[:40]:
+            return "warn"
+        return ""
+
+    def _append(self, batch: list):
+        """Insert a batch of lines with one Tk call per run of same-coloured lines."""
+        if not batch:
+            return
+        args: list = []
+        run_tag, run = None, []
+        for line in batch:
+            tag = self._tag(line)
+            if tag != run_tag and run:
+                args += ["\n".join(run) + "\n", (run_tag,) if run_tag else ()]
+                run = []
+            run_tag = tag
+            run.append(line)
+        if run:
+            args += ["\n".join(run) + "\n", (run_tag,) if run_tag else ()]
+        self.text.insert("end", *args)
         lines = int(self.text.index("end-1c").split(".")[0])
         if lines > 20000:
             self.text.delete("1.0", f"{lines - 20000}.0")
-        if scroll and self.autoscroll.get():
+        if self.autoscroll.get():
             self.text.see("end")
 
     def copy(self):
@@ -216,7 +234,7 @@ class VersionTab(ttk.Frame):
                 j = v.version_json_path(app.paths, d)
                 j.unlink(missing_ok=True)
             inst.version_id = ""
-            return launch.ensure_installed(app.paths, inst, p, c, app.settings.download_workers)
+            return launch.ensure_installed(app.paths, inst, p, c, app.settings.download_workers, verify=True)
         app.tasks.run(work, lambda _: messagebox.showinfo("Version", "Game files verified.", parent=self.win),
                       label="Re-downloading game files...", parent=self.win)
 
@@ -264,7 +282,9 @@ class ContentTab(ttk.Frame):
         self.tree.tag_configure("disabled", foreground=c["muted"])
         self.tree.tag_configure("problem", foreground=c["warn"])
         self.tree.tag_configure("update", foreground=c["accent"])
-        self.tree.bind("<Double-Button-1>", lambda e: self.toggle())
+        self.tree.bind("<Double-Button-1>",
+                       lambda e: None if self.tree.identify_column(e.x) == "#1" else self.toggle())
+        self.tree.bind("<Button-1>", self._click_checkbox, add="+")
         self.tree.bind("<space>", lambda e: self.toggle())
         self.tree.bind("<Delete>", lambda e: self.remove())
         self.tree.bind("<<TreeviewSelect>>", self._show_detail)
@@ -286,8 +306,23 @@ class ContentTab(ttk.Frame):
 
     def refresh(self, rescan: bool = True):
         if rescan:
-            self.folder.mkdir(parents=True, exist_ok=True)
-            self._scanned = mods.list_content(self.folder, self.kind)
+            # Reading jar metadata can take a while with hundreds of mods: do it off the UI thread.
+            self._scan_token = getattr(self, "_scan_token", 0) + 1
+            token = self._scan_token
+            folder, kind = self.folder, self.kind
+
+            def work(p, c):
+                folder.mkdir(parents=True, exist_ok=True)
+                return mods.list_content(folder, kind)
+
+            def done(items):
+                if token == self._scan_token and self.winfo_exists():
+                    self._scanned = items
+                    self.refresh(rescan=False)
+            if not self._scanned:
+                self.summary.configure(text="Scanning...")
+            self.win.app.tasks.run(work, done, quiet=True, parent=self.win)
+            return
         q = self.filter.get().strip().lower()
         sel = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
@@ -321,6 +356,17 @@ class ContentTab(ttk.Frame):
             if self.tree.exists(s):
                 self.tree.selection_add(s)
         self.summary.configure(text=f"{enabled} enabled of {len(self._scanned)}")
+
+    def _click_checkbox(self, event):
+        """A single click in the "On" column toggles that row."""
+        if self.tree.identify_column(event.x) != "#1" or self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.tree.identify_row(event.y)
+        if row in self.items:
+            self._set(self.items[row], not self.items[row].enabled)
+            self.tree.selection_set(row)
+            self.refresh()
+        return "break"
 
     def _selected(self) -> list[mods.ModFile]:
         return [self.items[i] for i in self.tree.selection() if i in self.items]
@@ -489,7 +535,13 @@ class WorldsTab(ttk.Frame):
         worlds.sort(key=lambda d: d.stat().st_mtime, reverse=True)
         for d in worlds:
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(d.stat().st_mtime))
-            self.tree.insert("", "end", iid=d.name, values=(d.name, mtime, human_size(self._size(d))))
+            self.tree.insert("", "end", iid=d.name, values=(d.name, mtime, "..."))
+
+        def done(sizes):  # sizes are computed in the background (big worlds are slow to walk)
+            for name, size in sizes.items():
+                if self.winfo_exists() and self.tree.exists(name):
+                    self.tree.set(name, "size", human_size(size))
+        self.win.app.tasks.run(lambda p, c: {d.name: self._size(d) for d in worlds}, done, quiet=True)
 
     def _sel(self) -> Path | None:
         s = self.tree.selection()

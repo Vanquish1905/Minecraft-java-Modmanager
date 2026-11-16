@@ -12,11 +12,74 @@ from ..platform_utils import IS_MAC
 
 
 def bind_right_click(widget: tk.Misc, handler: Callable) -> None:
-    if IS_MAC:
+    widget.bind("<Button-3>", handler)
+    if IS_MAC:  # Tk 8.6 on macOS reports the right button as Button-2; Tk 8.7+ as Button-3
         widget.bind("<Button-2>", handler)
         widget.bind("<Control-Button-1>", handler)
-    else:
-        widget.bind("<Button-3>", handler)
+
+
+def _sort_key(value: str):
+    text = value.replace(",", "").strip()
+    try:
+        return (0, float(text), "")
+    except ValueError:
+        return (1, 0.0, text.lower())
+
+
+def make_sortable(tree: ttk.Treeview) -> None:
+    """Click a column heading to sort by it; click again to reverse."""
+    state = {"col": None, "rev": False}
+
+    def sort(col):
+        rev = not state["rev"] if state["col"] == col else False
+        state.update(col=col, rev=rev)
+        rows = [(tree.set(k, col), k) for k in tree.get_children("")]
+        rows.sort(key=lambda r: _sort_key(r[0]), reverse=rev)
+        for i, (_, k) in enumerate(rows):
+            tree.move(k, "", i)
+        for c in tree["columns"]:
+            text = tree.heading(c, "text").rstrip(" ▲▼")
+            tree.heading(c, text=text + ((" ▼" if rev else " ▲") if c == col else ""))
+
+    for c in tree["columns"]:
+        tree.heading(c, command=lambda c=c: sort(c))
+
+
+class Debouncer:
+    """Call `fn` once the user has stopped typing for `delay` ms."""
+
+    def __init__(self, widget: tk.Misc, delay: int, fn: Callable[[], None]):
+        self.widget, self.delay, self.fn = widget, delay, fn
+        self._job = None
+
+    def __call__(self, *_):
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        self._job = self.widget.after(self.delay, self._fire)
+
+    def _fire(self):
+        self._job = None
+        if self.widget.winfo_exists():
+            self.fn()
+
+
+def app_icon(root: tk.Misc, color: str = "#3fa34d") -> tk.PhotoImage:
+    """A small block-style icon drawn in code (no image files needed)."""
+    size = 32
+    img = tk.PhotoImage(master=root, width=size, height=size)
+    dark = "#2a7034"
+    img.put(color, to=(0, 0, size, size))
+    img.put(dark, to=(0, size - 10, size, size))
+    img.put("#7a5230", to=(0, size - 7, size, size))
+    # a "V"
+    for y in range(5, 20):
+        dx = (y - 5) // 2
+        img.put("#ffffff", to=(7 + dx, y, 11 + dx, y + 1))
+        img.put("#ffffff", to=(21 - dx, y, 25 - dx, y + 1))
+    return img
 
 
 def wheel_steps(event) -> int:
@@ -65,6 +128,7 @@ def make_tree(parent, columns: list[tuple[str, str, int]], show_tree: bool = Fal
         tree.column(cid, width=width, minwidth=40, stretch=width > 150 or n == len(columns) - 1, anchor="w")
     if show_tree:
         tree.column("#0", width=36, stretch=False)
+    make_sortable(tree)
     sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=sb.set)
     tree.grid(row=0, column=0, sticky="nsew")

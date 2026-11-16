@@ -11,7 +11,7 @@ from typing import Callable
 from .. import accounts, java, launch, loaders, modrinth, mrpack, net, versions
 from ..instances import Instance
 from ..platform_utils import human_size, open_path
-from .widgets import Dialog, make_tree
+from .widgets import Debouncer, Dialog, make_tree
 
 
 # ====================================================================== version list
@@ -653,9 +653,11 @@ class ModrinthBrowser(Dialog):
         e.pack(side="left", fill="x", expand=True)
         e.bind("<Return>", lambda ev: self.search(True))
         e.focus_set()
+        self.query.trace_add("write", Debouncer(self, 450, lambda: self.search(True)))
         self.sort = tk.StringVar(value="Relevance")
-        ttk.Combobox(top, textvariable=self.sort, values=list(self.SORTS), state="readonly",
-                     width=11).pack(side="left", padx=6)
+        sort_box = ttk.Combobox(top, textvariable=self.sort, values=list(self.SORTS), state="readonly", width=11)
+        sort_box.pack(side="left", padx=6)
+        sort_box.bind("<<ComboboxSelected>>", lambda e: self.search(True))
         ttk.Button(top, text="Search", style="Accent.TButton", command=lambda: self.search(True)).pack(side="left")
         info = f"Showing results for Minecraft {inst.mc_version}"
         if project_type == "mod" and inst.loader != "vanilla":
@@ -694,10 +696,12 @@ class ModrinthBrowser(Dialog):
         q, sort = self.query.get(), self.SORTS[self.sort.get()]
         inst = self.inst
         offset = self.offset
+        self._token = getattr(self, "_token", 0) + 1
+        token = self._token
 
         def done(res):
-            if not self.winfo_exists():
-                return
+            if not self.winfo_exists() or token != self._token:
+                return  # a newer search has started
             hits, total = res
             if new:
                 self.tree.delete(*self.tree.get_children())

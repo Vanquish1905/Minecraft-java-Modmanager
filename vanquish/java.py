@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -124,8 +125,10 @@ def _candidates(paths: Paths | None) -> list[str]:
 def detect_all(paths: Paths | None = None) -> list[JavaInstall]:
     seen = set()
     installs = []
-    for c in _candidates(paths):
-        info = probe(c)
+    cands = _candidates(paths)
+    with ThreadPoolExecutor(max_workers=8) as pool:  # each probe starts a JVM; do them together
+        results = list(pool.map(probe, cands))
+    for c, info in zip(cands, results):
         if info is None:
             continue
         key = os.path.realpath(c)

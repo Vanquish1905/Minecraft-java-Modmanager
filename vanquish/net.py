@@ -125,20 +125,27 @@ def sha1_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def file_ok(path: Path, sha1: str | None = None, size: int | None = None) -> bool:
-    if not path.is_file():
+def file_ok(path: Path, sha1: str | None = None, size: int | None = None, verify: bool = False) -> bool:
+    """Is an existing file usable? Fast mode trusts a matching size (files are hashed when
+    downloaded); `verify=True` re-hashes everything."""
+    try:
+        st = path.stat()
+    except OSError:
         return False
-    if size is not None and size >= 0 and path.stat().st_size != size:
-        return False
+    if size is not None and size >= 0:
+        if st.st_size != size:
+            return False
+        if not verify:
+            return True
     if sha1:
         return sha1_of(path).lower() == sha1.lower()
     return True
 
 
 def download(url: str, dest: Path, sha1: str | None = None, size: int | None = None,
-             cancel: threading.Event | None = None) -> Path:
+             cancel: threading.Event | None = None, verify: bool = False) -> Path:
     """Download `url` to `dest` atomically, verifying the SHA-1 when known."""
-    if file_ok(dest, sha1, size):
+    if file_ok(dest, sha1, size, verify):
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + f".part{threading.get_ident()}")
@@ -190,14 +197,15 @@ ProgressFn = Callable[[str, Optional[float]], None]
 
 def download_many(jobs: Iterable[DownloadJob], progress: ProgressFn | None = None,
                   label: str = "Downloading", workers: int = 8,
-                  cancel: threading.Event | None = None) -> None:
+                  cancel: threading.Event | None = None, verify: bool = False) -> None:
     """Download many files in parallel, skipping ones that are already valid."""
     jobs = list(jobs)
     # Collapse duplicates (same destination).
     unique: dict[str, DownloadJob] = {}
     for j in jobs:
         unique.setdefault(str(j.dest), j)
-    jobs = list(unique.values())
+    # Skip files that are already present before starting any threads (fast path).
+    jobs = [j for j in unique.values() if not file_ok(j.dest, j.sha1, j.size, verify)]
     total = len(jobs)
     if not total:
         return
@@ -205,7 +213,7 @@ def download_many(jobs: Iterable[DownloadJob], progress: ProgressFn | None = Non
     lock = threading.Lock()
 
     def work(job: DownloadJob):
-        download(job.url, job.dest, job.sha1, job.size, cancel)
+        download(job.url, job.dest, job.sha1, job.size, cancel, verify=True)
 
     errors: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:

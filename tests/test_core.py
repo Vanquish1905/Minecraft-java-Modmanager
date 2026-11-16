@@ -173,6 +173,34 @@ class InstanceTest(unittest.TestCase):
             self.assertEqual(Config(paths).settings.max_memory, 6144)
 
 
+class SpeedPathTest(unittest.TestCase):
+    def test_file_ok_fast_and_verify(self):
+        from vanquish import net
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "a"
+            f.write_bytes(b"hello")
+            good = net.sha1_of(f)
+            self.assertTrue(net.file_ok(f, "0" * 40, 5))            # fast: size matches, hash not read
+            self.assertFalse(net.file_ok(f, "0" * 40, 5, verify=True))
+            self.assertTrue(net.file_ok(f, good, 5, verify=True))
+            self.assertFalse(net.file_ok(f, good, 6))
+            self.assertFalse(net.file_ok(f, "0" * 40))              # no size: always hashed
+            self.assertFalse(net.file_ok(Path(d) / "missing"))
+
+    def test_manifest_cache_expires(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = Paths(Path(d)).ensure()
+            cache = paths.cache / "version_manifest_v2.json"
+            cache.write_text(json.dumps({"versions": [{"id": "old"}]}))
+            with mock.patch.object(versions.net, "get_json", return_value={"versions": [{"id": "new"}]}):
+                self.assertEqual(versions.get_manifest(paths)["versions"][0]["id"], "old")
+                os.utime(cache, (0, 0))
+                self.assertEqual(versions.get_manifest(paths)["versions"][0]["id"], "new")
+            os.utime(cache, (0, 0))
+            with mock.patch.object(versions.net, "get_json", side_effect=versions.net.NetworkError("offline")):
+                self.assertEqual(versions.get_manifest(paths)["versions"][0]["id"], "new")  # offline fallback
+
+
 class MrpackTest(unittest.TestCase):
     def _pack(self, d: Path, files, deps=None, extra=None):
         index = {"formatVersion": 1, "game": "minecraft", "name": "Test Pack", "versionId": "1",

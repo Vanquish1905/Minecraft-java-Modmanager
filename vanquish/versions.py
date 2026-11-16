@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,9 +24,12 @@ RESOURCES_URL = os.environ.get("VANQUISH_RESOURCES_URL", "https://resources.down
 
 # --------------------------------------------------------------------------- manifest
 
+MANIFEST_MAX_AGE = 3600  # seconds; new Minecraft versions show up within an hour
+
+
 def get_manifest(paths: Paths, refresh: bool = False) -> dict:
     cache = paths.cache / "version_manifest_v2.json"
-    if not refresh:
+    if not refresh and cache.exists() and time.time() - cache.stat().st_mtime < MANIFEST_MAX_AGE:
         data = read_json(cache)
         if data:
             return data
@@ -298,7 +302,8 @@ def asset_index_path(paths: Paths, version: dict) -> Path:
     return paths.assets / "indexes" / f"{idx.get('id', version.get('assets', 'legacy'))}.json"
 
 
-def install_assets(paths: Paths, version: dict, progress=None, cancel=None, workers: int = 8) -> dict:
+def install_assets(paths: Paths, version: dict, progress=None, cancel=None, workers: int = 8,
+                   verify: bool = False) -> dict:
     idx = version.get("assetIndex")
     if not idx:
         return {}
@@ -310,7 +315,7 @@ def install_assets(paths: Paths, version: dict, progress=None, cancel=None, work
         h = obj["hash"]
         jobs.append(net.DownloadJob(f"{RESOURCES_URL}{h[:2]}/{h}", paths.assets / "objects" / h[:2] / h,
                                     h, obj.get("size")))
-    net.download_many(jobs, progress, "Downloading assets", workers=workers, cancel=cancel)
+    net.download_many(jobs, progress, "Downloading assets", workers=workers, cancel=cancel, verify=verify)
     return index
 
 
@@ -349,7 +354,7 @@ def logging_config(paths: Paths, version: dict) -> Optional[tuple[Path, str]]:
 
 
 def install_version(paths: Paths, version_id: str, progress=None,
-                    cancel: threading.Event | None = None, workers: int = 8) -> dict:
+                    cancel: threading.Event | None = None, workers: int = 8, verify: bool = False) -> dict:
     """Make sure every file needed to run `version_id` is present. Returns merged json."""
     def report(text, frac=None):
         if progress:
@@ -380,8 +385,8 @@ def install_version(paths: Paths, version_id: str, progress=None,
         jobs.append(net.DownloadJob(log_cfg["url"], paths.assets / "log_configs" / log_cfg["id"],
                                     log_cfg.get("sha1"), log_cfg.get("size")))
 
-    net.download_many(jobs, progress, "Downloading libraries", workers=workers, cancel=cancel)
-    install_assets(paths, version, progress, cancel, workers=workers)
+    net.download_many(jobs, progress, "Downloading libraries", workers=workers, cancel=cancel, verify=verify)
+    install_assets(paths, version, progress, cancel, workers=workers, verify=verify)
     report("Game files ready", 1.0)
     return version
 
