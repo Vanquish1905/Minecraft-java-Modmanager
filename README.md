@@ -24,6 +24,26 @@ packages**. It runs on **Windows, macOS and Linux**.
 
 Forge and NeoForge instances are not supported yet. Their installers need extra processing steps.
 
+## Download
+
+Get the latest version from the [Releases page](https://github.com/Vanquish1905/Minecraft-java-Modmanager/releases):
+
+- **Windows:** `VanquishModManager.exe`. Double-click it; nothing needs to be installed.
+- **Linux (portable):** unzip `VanquishModManager-<version>-linux-portable.zip` and run `./VanquishModManager`.
+  All data stays in the `data` folder next to it.
+
+You can also run it from source (below).
+
+## Building the exe yourself
+
+```bash
+py -m pip install pyinstaller
+py build.py
+```
+
+The result is `dist\VanquishModManager.exe`, with the app icon. On Linux, `python3 build.py --portable-zip`
+also creates the portable zip. Pushing a tag like `v2.0.1` makes GitHub Actions build both and publish a release.
+
 ## Requirements
 
 - Python **3.9 or newer** with Tkinter

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 data/
 portable.txt
+build/
+dist/
+*.spec

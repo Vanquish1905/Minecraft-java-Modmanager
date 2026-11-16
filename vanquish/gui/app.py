@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass, field
+from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 from typing import Optional
 
@@ -79,8 +80,7 @@ class App:
         geo = self.settings.window_geometry.split("+")[0]
         self.root.geometry(geo if geo and "x" in geo else "1100x680")
         self.theme = Theme(self.root, self.settings.theme)
-        self._icon = app_icon(self.root)
-        self.root.iconphoto(True, self._icon)
+        self._set_window_icon()
 
         self.running: dict[str, RunningGame] = {}
         self.logs: dict[str, InstanceLog] = {}
@@ -170,6 +170,18 @@ class App:
         bind_wheel(self.canvas, self.canvas)
         self._build_sidebar()
         self._update_account_label()
+
+    def _set_window_icon(self):
+        """Use the bundled icon (icon.ico / icon.png); fall back to a drawn one."""
+        assets = Path(__file__).resolve().parent.parent / "assets"
+        try:
+            if IS_WINDOWS and (assets / "icon.ico").exists():
+                self.root.iconbitmap(default=str(assets / "icon.ico"))
+                return
+            self._icon = tk.PhotoImage(master=self.root, file=str(assets / "icon.png"))
+        except (tk.TclError, OSError):
+            self._icon = app_icon(self.root)
+        self.root.iconphoto(True, self._icon)
 
     def _bind_shortcuts(self):
         mod = "Command" if IS_MAC else "Control"
