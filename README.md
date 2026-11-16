@@ -42,7 +42,7 @@ py build.py
 ```
 
 The result is `dist\VanquishModManager.exe`, with the app icon. On Linux, `python3 build.py --portable-zip`
-also creates the portable zip. Pushing a tag like `v2.0.1` makes GitHub Actions build both and publish a release.
+also creates the portable zip. To publish a new release, raise `__version__` in `vanquish/__init__.py` and push to `main`. GitHub Actions then builds both files and publishes them under Releases.
 
 ## Requirements
 
